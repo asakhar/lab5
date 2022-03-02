@@ -6,11 +6,12 @@
 #include <memory>
 #include <tuple>
 #include <type_traits>
+#include <optional>
 
 class ThreadBase {
  public:
   ThreadBase() = default;
-  ~ThreadBase() = default;
+  virtual ~ThreadBase() = default;
   ThreadBase(ThreadBase const&) = delete;
   ThreadBase& operator=(ThreadBase const&) = delete;
   ThreadBase& operator=(ThreadBase&&) = delete;
@@ -35,7 +36,7 @@ class Thread : ThreadBase {
 
  public:
   Thread() { detached = true; }
-  Thread(Fn&& fn, Args... args) {
+  explicit Thread(Fn&& fn, Args... args) {
     static constexpr auto deleter = [](ArgsContainer* ptr) {
       ptr->~ArgsContainer();
       std::free(ptr);
@@ -135,8 +136,8 @@ class Atomic {
     long long nwv{};
     std::memcpy(reinterpret_cast<void*>(&old),
                 reinterpret_cast<void const*>(&cmp), sizeof(T));
-    std::memcpy(reinterpret_cast<void*>(&nwv), reinterpret_cast<void const*>(&to),
-                sizeof(T));
+    std::memcpy(reinterpret_cast<void*>(&nwv),
+                reinterpret_cast<void const*>(&to), sizeof(T));
     asm volatile(R"(
       mov %0, %%rax
       cmpxchg %1, (%2)
@@ -179,7 +180,9 @@ class GuardLock {
  public:
   GuardLock(Mut& mut) : mutex{mut} {}
   ~GuardLock() { mutex.unlock(); }
-  operator typename Mut::T &() { return *mutex.guardant.get(); }
+  operator typename Mut::T &() {
+      return *mutex.guardant.get();
+  }
 
  private:
   Mut& mutex;
@@ -191,7 +194,8 @@ class Mutex {
 
  public:
   Mutex(Guardant&& value = {}, bool is_locked = false)
-      : guardant(std::make_shared<Guardant>(value)), locked{std::make_shared<Atomic<bool>>(is_locked)} {}
+      : guardant(std::make_shared<Guardant>(value)),
+        locked{std::make_shared<Atomic<bool>>(is_locked)} {}
 
   GuardLock<Mutex> lock() {
     while (locked->cas(false, true) != true) {
@@ -201,6 +205,11 @@ class Mutex {
 #pragma GCC diagnostic pop
     }
     return GuardLock{*this};
+  }
+  std::optional<GuardLock<Mutex>> try_lock() {
+    if (locked->cas(false, true) == true) 
+      return {*this};
+    return {};
   }
   Mutex& operator=(Mutex&& move) {
     guardant = std::move(move.guardant);
@@ -220,9 +229,8 @@ class Mutex {
   }
   friend class GuardLock<Mutex>;
 
-  void unlock() { locked->set(false); }
-
  private:
+  void unlock() { locked->set(false); }
   std::shared_ptr<Guardant> guardant;
   std::shared_ptr<Atomic<bool>> locked;
 };
