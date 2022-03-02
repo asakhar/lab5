@@ -9,6 +9,8 @@ use std::sync::{
   Arc, Mutex,
 };
 
+use rand::Rng;
+
 #[macro_export]
 macro_rules! error_and_exit {
   ($msg:expr, $err:expr) => {
@@ -278,6 +280,8 @@ fn main() {
       }
     }
     res_loc.fetch_add(cnt, Ordering::Relaxed);
+    let delay: u64 = rand::thread_rng().sample(rand::distributions::Uniform::from(1..4));
+    std::thread::sleep(std::time::Duration::from_secs(delay));
     task.result = cnt.to_le_bytes().to_vec();
   };
 
@@ -305,6 +309,8 @@ fn main() {
           percentage,
           "\u{2588}".repeat(percentage as usize)
         );
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
       }
     };
   }
