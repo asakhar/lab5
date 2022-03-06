@@ -19,7 +19,7 @@ int proc(int a, char b) {
   return a + (int)b;
 }
 
-void p(Mutex<size_t> result, char const* data, char const* end, char to_find) {
+void p(SpinLock<size_t> result, char const* data, char const* end, char to_find) {
   size_t res = 0;
   for (auto begin = data; begin < end; ++begin) {
     if (*begin == to_find) ++res;
