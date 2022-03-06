@@ -10,7 +10,7 @@
 size_t constexpr SIZE = 2000;
 
 int main(int argc, char const* argv[]) {
-  SpinLock<std::string> mut{"*"};
+  Mutex<std::string> mut{"*"};
   std::stringstream ss;
 
 
@@ -41,7 +41,7 @@ int main(int argc, char const* argv[]) {
     }
   };
 
-  std::vector<Thread<decltype(worka)&>> threads;
+  std::vector<Thread> threads;
   for(auto i = 0ul; i < 100; ++i)
     threads.emplace_back(worka);
 

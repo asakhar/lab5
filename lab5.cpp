@@ -14,20 +14,6 @@ void usage(int argc, char const* argv[]) {
   exit(1);
 }
 
-int proc(int a, char b) {
-  std::cout << b;
-  return a + (int)b;
-}
-
-void p(SpinLock<size_t> result, char const* data, char const* end, char to_find) {
-  size_t res = 0;
-  for (auto begin = data; begin < end; ++begin) {
-    if (*begin == to_find) ++res;
-  }
-  delete[] data;
-  result.lock() += res;
-};
-
 int main(int argc, char const* argv[]) {
   if (argc < 4) {
     usage(argc, argv);
@@ -71,26 +57,23 @@ int main(int argc, char const* argv[]) {
   std::ifstream file{argv[1]};
   Mutex<size_t> result{0};
 
-  auto p = [result](char const* data, char const* end, char to_find) mutable {
+  auto p = [result](std::vector<char> data, char to_find) mutable {
     size_t res = 0;
-    for (auto begin = data; begin < end; ++begin) {
-      if (*begin == to_find) ++res;
+    for (char ch : data) {
+      if (ch == to_find) ++res;
     }
-    delete[] data;
     result.lock() += res;
   };
-  using FnPtr = decltype(p) &;
-  std::vector<Thread<FnPtr, char*, char*, char>> threads;
+  using FnPtr = decltype(p)&;
+  std::vector<Thread> threads;
   for (size_t i = 0; i < processorsQuantity - 1; ++i) {
-    char* buf = new char[blockSize];
-    file.read(buf, blockSize);
-    threads.push_back(
-        Thread(p, buf, buf + blockSize, character_to_count));
+    std::vector<char> buf(blockSize);
+    file.read(buf.data(), blockSize);
+    threads.push_back(Thread(p, buf, character_to_count));
   }
-  char* buf = new char[lastBlockSize];
-  file.read(buf, lastBlockSize);
-  threads.push_back(
-      Thread(p, buf, buf + lastBlockSize, character_to_count));
+  std::vector<char> buf(lastBlockSize);
+  file.read(buf.data(), lastBlockSize);
+  threads.push_back(Thread(p, buf, character_to_count));
   for (auto& th : threads) th.join();
 
   std::cout << result.lock();

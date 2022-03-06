@@ -5,6 +5,7 @@
 #include <sched.h>
 
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -13,49 +14,24 @@
 #include <tuple>
 #include <type_traits>
 
-#define panic(error) {std::fprintf(stderr, "Error: %s", error); exit(1);}
+#define panic(error)                          \
+  {                                           \
+    std::fprintf(stderr, "Error: %s", error); \
+    exit(1);                                  \
+  }
 
-class ThreadBase {
- public:
-  ThreadBase() = default;
-  virtual ~ThreadBase() = default;
-  ThreadBase(ThreadBase const&) = delete;
-  ThreadBase& operator=(ThreadBase const&) = delete;
-  ThreadBase& operator=(ThreadBase&&) = delete;
-  ThreadBase(ThreadBase&&) = delete;
-
- protected:
-  pthread_t handle{};
-  bool detached = false;
-  bool joined = false;
-};
-
-template <typename T, typename U>
-struct pair {
-  T first;
-  U second;
-};
-
-template <typename Fn, typename... Args>
-class Thread : ThreadBase {
-  using ArgsContainer = pair<Fn, std::tuple<Args...>>;
-  using Return_t = std::invoke_result_t<Fn, Args...>;
-
+class Thread {
  public:
   Thread() { detached = true; }
+  template <typename Fn, typename... Args>
+  requires std::is_invocable_v<Fn, Args...>
   explicit Thread(Fn&& fn, Args... args) {
-    static constexpr auto deleter = [](ArgsContainer* ptr) {
-      ptr->~ArgsContainer();
-      std::free(ptr);
-    };
-    auto ptr = std::unique_ptr<ArgsContainer, decltype(deleter)>(
-        reinterpret_cast<ArgsContainer*>(malloc(sizeof(ArgsContainer))),
-        deleter);
-    auto arg = new (ptr.get())
-        ArgsContainer{std::forward<Fn>(fn), {std::forward<Args>(args)...}};
-    if (pthread_create(&handle, nullptr, Thread::_start,
-                       reinterpret_cast<void*>(arg)) == 0) {
-      (void)ptr.release();
+    using ArgsContainer = std::pair<Fn, std::tuple<Args...>>;
+    auto arg = std::make_unique<ArgsContainer>(
+        std::forward<Fn>(fn), std::tuple<Args...>{std::forward<Args>(args)...});
+    if (pthread_create(&handle, nullptr, Thread::_start<ArgsContainer>,
+                       reinterpret_cast<void*>(arg.get())) == 0) {
+      (void)arg.release();
     }
   }
   Thread(Thread const&) = delete;
@@ -64,15 +40,13 @@ class Thread : ThreadBase {
     if (!detached && !joined) {
       void* ret;
       pthread_join(handle, &ret);
-      if constexpr (!std::is_same_v<Return_t, void>) {
-        std::free(ret);
-      }
     }
     detached = move.detached;
     joined = move.joined;
     handle = move.handle;
     move.handle = 0;
     move.detached = true;
+    return *this;
   };
   Thread(Thread&& move) {
     detached = move.detached;
@@ -81,59 +55,53 @@ class Thread : ThreadBase {
     move.handle = 0;
     move.detached = true;
   };
-  auto join() {
+  void join() {
     joined = true;
     void* ret;
     pthread_join(handle, &ret);
-    if constexpr (!std::is_same_v<Return_t, void>) {
-      auto res = *reinterpret_cast<Return_t*>(ret);
-      reinterpret_cast<ArgsContainer*>(ret)->~ArgsContainer();
-      std::free(ret);
-      return res;
-    }
   }
   bool detach() { return detached = (pthread_detach(handle) == 0); }
   ~Thread() {
     if (!detached && !joined) {
       void* ret;
       pthread_join(handle, &ret);
-      if constexpr (!std::is_same_v<Return_t, void>) {
-        std::free(ret);
-      }
     }
   }
 
  private:
+  template <typename ArgsContainer>
   static void* _start(void* args) {
-    auto arg = reinterpret_cast<ArgsContainer*>(args);
-    if constexpr (!std::is_same_v<Return_t, void>) {
-      static constexpr auto deleter = [](Return_t* ptr) {
-        ptr->~Return_t();
-        std::free(ptr);
-      };
-      auto ptr = std::unique_ptr<Return_t, decltype(deleter)>(
-          reinterpret_cast<Return_t*>(malloc(sizeof(Return_t))), deleter);
-      auto ret = new (ptr.get()) Return_t{std::apply(arg->first, arg->second)};
-      std::free(arg);
-      return ptr.release();
-    }
+    auto arg =
+        std::unique_ptr<ArgsContainer>(reinterpret_cast<ArgsContainer*>(args));
     std::apply(arg->first, arg->second);
     return nullptr;
   }
+  pthread_t handle{};
+  bool detached = false;
+  bool joined = false;
 };
 
-template <typename Fn, typename... Args>
-Thread(Fn const&, Args... args) -> Thread<Fn const&, Args...>;
-template <typename Fn, typename... Args>
-Thread(Fn&, Args... args) -> Thread<Fn&, Args...>;
+template <typename T>
+struct sizeof_t {
+  static constexpr size_t value = sizeof(T);
+};
+
+template <typename T>
+struct sizeof_t<T*> {
+  static constexpr size_t value = sizeof(std::intptr_t);
+};
+
+template <typename T>
+constexpr size_t sizeof_v = sizeof_t<T>::value;
 
 template <typename T>
 class Atomic {
  public:
+  static size_t constexpr TYPE_SIZE = sizeof_v<T>;
   explicit Atomic(T init = {}) {
-    static_assert(sizeof(init) <= 8 && std::is_standard_layout_v<T> &&
-                      std::is_trivial_v<T>,
-                  "Invalid type for atomic");
+    static_assert(
+        TYPE_SIZE <= 8 && std::is_standard_layout_v<T> && std::is_trivial_v<T>,
+        "Invalid type for atomic");
 
     asm volatile(R"(
                         mov %1, (%0)
@@ -179,8 +147,8 @@ class Atomic {
   }
 
  private:
-  volatile char mutable value[sizeof(T)]{};
-  char _padding[16 - sizeof(T)];
+  volatile char mutable value[TYPE_SIZE]{};
+  char _padding[16 - TYPE_SIZE];
 };
 
 template <typename Mut>
@@ -188,8 +156,8 @@ class GuardLock {
  public:
   GuardLock(Mut& mut) : mutex{mut} {}
   ~GuardLock() { mutex.unlock(); }
-  operator typename Mut::T &() { return mutex.control->guardant; }
-  typename Mut::T& operator*() { return mutex.control->guardant; }
+  operator typename Mut::Type &() { return mutex.deref_unchecked(); }
+  typename Mut::Type& operator*() { return mutex.deref_unchecked(); }
 
  private:
   Mut& mutex;
@@ -197,7 +165,7 @@ class GuardLock {
 
 template <typename Guardant>
 class SpinLock {
-  using T = Guardant;
+  using Type = Guardant;
 
  public:
   SpinLock(Guardant&& value = {}, bool is_locked = false)
@@ -213,6 +181,7 @@ class SpinLock {
     if (control->locked.swap(true) == false) return {*this};
     return {};
   }
+  Guardant& deref_unchecked() { return control->guardant; }
   SpinLock& operator=(SpinLock&& move) {
     control = std::move(move.control);
     return *this;
@@ -227,7 +196,8 @@ class SpinLock {
 
  private:
   void unlock() {
-    if (control->locked.swap(false) == false) exit(1);
+    if (control->locked.swap(false) == false)
+      panic("Trying to unlock already unlocked spinlock.");
   }
   struct Control {
     Control(Guardant g, bool l) : guardant{g}, locked{l} {}
@@ -298,7 +268,7 @@ class CPEPQ {
     auto prev = tail.swap(node);
     if (prev == nullptr)
       head.cas(nullptr, node);
-    else if (reinterpret_cast<unsigned long long>(prev) & 1ull != 1)
+    else if (reinterpret_cast<unsigned long long>(prev) & 1ull)
       prev->next.swap(node);
   }
   std::optional<T> pop() {
@@ -343,7 +313,7 @@ class CPEPQ {
 
 template <typename Guardant>
 class Mutex {
-  using T = Guardant;
+  using Type = Guardant;
 
  public:
   explicit Mutex(Guardant&& value = {}, bool is_locked = false)
@@ -360,6 +330,7 @@ class Mutex {
     if (control->locked.swap(true) == false) return {*this};
     return {};
   }
+  Guardant& deref_unchecked() { return control->guardant; }
   Mutex& operator=(Mutex&& move) { control = std::move(move.control); }
   Mutex& operator=(Mutex const& copy) { control = copy.control; }
   Mutex(Mutex&& move) { control = std::move(move.control); }
