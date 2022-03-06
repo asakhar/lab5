@@ -300,14 +300,14 @@ fn main() {
   while finished != processors_quantity {
     if let Some(extracted) = coord.extract_computed() {
       {
-        let mut percentage = finished * 100 / processors_quantity;
-        print!("{}", "\r".repeat((percentage + 4) as usize));
+        print!("\r");
         finished += extracted.len() as u64;
-        percentage = finished * 100 / processors_quantity;
+        let percentage = finished * 100 / processors_quantity;
         cyan!(
-          "{:3}% {}",
+          "{:3}% [{}{}]",
           percentage,
-          "\u{2588}".repeat(percentage as usize)
+          "\u{2588}".repeat(percentage as usize),
+          " ".repeat(100-percentage as usize)
         );
         use std::io::Write;
         std::io::stdout().flush().unwrap();
