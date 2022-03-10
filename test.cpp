@@ -1,5 +1,3 @@
-#include <sched.h>
-
 #include <iostream>
 
 #include "threads.hpp"
@@ -7,39 +5,42 @@
 #include <string>
 #include <vector>
 
-size_t constexpr SIZE = 2000;
+using namespace My;
+
+size_t constexpr TSIZE = 200;
 
 int main(int argc, char const* argv[]) {
-  Mutex<std::string> mut{"*"};
+  My::SpinLock<std::string> mut{"*"};
   std::stringstream ss;
 
 
   auto worka = [mut, &ss]() mutable {
-    for (int i = 0; i < SIZE; ++i) {
+      My::SpinLock<std::string> local = mut;
+      for (int i = 0; i < TSIZE; ++i) {
       {
-        auto lock = mut.lock();
+        auto lock = local.lock();
         {
           ss << "abc" << *lock;
-          sched_yield();
+          SwitchToThread();
           ss << "def\n";
         }
       }
-      sched_yield();
+      SwitchToThread();
     }
   };
-  auto workb = [mut, &ss]() mutable {
-    for (int i = 0; i < SIZE; ++i) {
+  /*auto workb = [mut, &ss]() mutable {
+    for (int i = 0; i < TSIZE; ++i) {
       {
         auto lock = mut.lock();
         {
           ss << "123" << *lock;
-          sched_yield();
+          SwitchToThread();
           ss << "456\n";
         }
       }
-      sched_yield();
+      SwitchToThread();
     }
-  };
+  };*/
 
   std::vector<Thread> threads;
   for(auto i = 0ul; i < 100; ++i)
@@ -59,7 +60,7 @@ int main(int argc, char const* argv[]) {
     else 
       panic("Got invalid line");
   }
-  if(c != SIZE*threads.size())
+  if(c != TSIZE*threads.size())
     panic("Not all lines generated");
 
   std::cout << "Success\n";

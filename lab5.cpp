@@ -1,4 +1,3 @@
-#include <pthread.h>
 #include <sys/stat.h>
 
 #include <fstream>
@@ -7,6 +6,8 @@
 
 #include "errors.hpp"
 #include "threads.hpp"
+
+using namespace My;
 
 void usage(int argc, char const* argv[]) {
   std::cerr << "Usage:\n\t" << argv[0]
@@ -55,7 +56,7 @@ int main(int argc, char const* argv[]) {
   size_t lastBlockSize = fileSize - blockSize * (processorsQuantity - 1);
   char character_to_count = argv[3][0];
   std::ifstream file{argv[1]};
-  Mutex<size_t> result{0};
+  My::Mutex<size_t> result{0};
 
   auto p = [result](std::vector<char> data, char to_find) mutable {
     size_t res = 0;
@@ -64,8 +65,7 @@ int main(int argc, char const* argv[]) {
     }
     result.lock() += res;
   };
-  using FnPtr = decltype(p)&;
-  std::vector<Thread> threads;
+  std::vector<My::Thread> threads;
   for (size_t i = 0; i < processorsQuantity - 1; ++i) {
     std::vector<char> buf(blockSize);
     file.read(buf.data(), blockSize);
