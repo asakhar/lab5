@@ -285,6 +285,9 @@ class CPEPQ {
       goto begin_loop;
     }
   }
+    if (node->next.get()==nullptr) {
+      tail.swap(nullptr);
+    }
     if (!head.cas(node_prot, node->next.get())) {
       panic("Error: protected node changed!");
     }

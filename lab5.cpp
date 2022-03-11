@@ -7,8 +7,10 @@
 
 #include "errors.hpp"
 #include "threads.hpp"
+#include <cassert>
 
 void usage(int argc, char const* argv[]) {
+  assert(argc>0);
   std::cerr << "Usage:\n\t" << argv[0]
             << " <file_to_process> <number_of_threads> <character_to_count>\n";
   exit(1);
@@ -44,7 +46,7 @@ int main(int argc, char const* argv[]) {
       usage(argc, argv);
     }
   }
-  if (processorsQuantity > (fileSize >> 2)) {
+  if (processorsQuantity > static_cast<size_t>(fileSize >> 2)) {
     std::cout
         << "Quantity of processes you entered (" << processorsQuantity
         << ") exceeds half of the amount of data (" << (fileSize >> 2)
@@ -64,7 +66,6 @@ int main(int argc, char const* argv[]) {
     }
     result.lock() += res;
   };
-  using FnPtr = decltype(p)&;
   std::vector<Thread> threads;
   for (size_t i = 0; i < processorsQuantity - 1; ++i) {
     std::vector<char> buf(blockSize);
