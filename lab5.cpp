@@ -57,7 +57,7 @@ int main(int argc, char const* argv[]) {
   size_t lastBlockSize = fileSize - blockSize * (processorsQuantity - 1);
   char character_to_count = argv[3][0];
   std::ifstream file{argv[1]};
-  Mutex<size_t> result{0};
+  SpinLock<size_t> result{0};
 
   auto p = [result](std::vector<char> data, char to_find) mutable {
     size_t res = 0;
@@ -77,7 +77,7 @@ int main(int argc, char const* argv[]) {
   threads.push_back(Thread(p, buf, character_to_count));
   for (auto& th : threads) th.join();
 
-  std::cout << result.lock();
+  std::cout << result.lock() << std::endl;
 
   return 0;
 }

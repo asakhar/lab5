@@ -9,15 +9,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <tuple>
 #include <type_traits>
 
-#define panic(error)                          \
-  {                                           \
-    std::fprintf(stderr, "Error: %s", error); \
-    exit(1);                                  \
+#define panic(error)                              \
+  {                                               \
+    std::cerr << "Error: " << error << std::endl; \
+    exit(1);                                      \
   }
 
 class Thread {
@@ -58,7 +60,9 @@ class Thread {
   void join() {
     joined = true;
     void* ret;
-    pthread_join(handle, &ret);
+    while (pthread_tryjoin_np(handle, &ret) == EBUSY) {
+      pthread_kill(handle, SIGCONT);
+    }
   }
   bool detach() { return detached = (pthread_detach(handle) == 0); }
   ~Thread() {
@@ -74,6 +78,7 @@ class Thread {
     auto arg =
         std::unique_ptr<ArgsContainer>(reinterpret_cast<ArgsContainer*>(args));
     std::apply(arg->first, arg->second);
+    pthread_exit(nullptr);
     return nullptr;
   }
   pthread_t handle{};
@@ -104,9 +109,11 @@ class Atomic {
         "Invalid type for atomic");
 
     asm volatile(R"(
-                        mov %1, (%0)
+    mfence
+    mov %1, (%0)
                     )" ::"r"(value),
-                 "r"(init));
+                 "r"(init)
+                 : "memory");
   }
 
   Atomic(Atomic&& move) = delete;
@@ -117,37 +124,115 @@ class Atomic {
   bool cas(T cmp, T to) const {
     short changed = 0;
     asm volatile(R"(
-        lock cmpxchg %2, (%3)
-        lahf
+    mfence
+    lock cmpxchg %2, (%3)
+    lahf
       )"
                  : "=a"(changed)
                  : "a"(cmp), "r"(to), "r"(value)
-                 :);
+                 : "memory");
     return static_cast<bool>(changed & (1 << 14));
   }
 
   inline T swap(T val) const {
     asm volatile(R"(
-        lock xchg (%2), %1
+    mfence
+    lock xchg (%2), %1
       )"
                  : "=a"(val)
-                 : "a"(val), "r"(value));
+                 : "a"(val), "r"(value)
+                 : "memory");
     return val;
   }
 
   inline T get() const {
     T res{};
     asm volatile(R"(
-              mov (%1), %0
+    mfence
+    mov (%1), %0
           )"
                  : "=r"(res)
                  : "r"(value)
-                 :);
+                 : "memory");
     return res;
   }
 
  private:
   volatile char mutable value[TYPE_SIZE]{};
+  char _padding[16 - TYPE_SIZE];
+};
+
+template <typename T>
+class Atomic2 {
+ public:
+  static size_t constexpr TYPE_SIZE = sizeof_v<T>;
+  explicit Atomic2(T init = {}) : value{init} {
+    static_assert(
+        TYPE_SIZE <= 8 && std::is_standard_layout_v<T> && std::is_trivial_v<T>,
+        "Invalid type for atomic");
+  }
+
+  Atomic2(Atomic2&& move) = delete;
+  Atomic2(Atomic2 const& copy) = delete;
+  Atomic2& operator=(Atomic2&& move) = delete;
+  Atomic2& operator=(Atomic2 const& copy) = delete;
+
+  bool cas(T cmp, T to) const {
+    short changed = 0;
+    asm volatile(R"(
+    mfence
+    lock cmpxchg %2, (%3)
+    lahf
+      )"
+                 : "=a"(changed)
+                 : "a"(cmp), "r"(to), "r"(&value)
+                 : "memory");
+    return static_cast<bool>(changed & (1 << 14));
+  }
+
+  inline T swap(T val) const {
+    asm volatile(R"(
+    mfence
+    lock xchg (%2), %1
+      )"
+                 : "=a"(val)
+                 : "a"(val), "r"(&value)
+                 : "memory");
+    return val;
+  }
+
+  inline T fetch_add(T add) const {
+    T prev;
+    while (prev = get(), !cas(prev, prev + add))
+      ;
+    return prev;
+  }
+
+  inline T fetch_sub(T add) const {
+    T prev;
+    while (prev = get(), !cas(prev, prev - add))
+      ;
+    return prev;
+  }
+
+  inline T fetch_mul(T add) const {
+    T prev;
+    while (prev = get(), !cas(prev, prev * add))
+      ;
+    return prev;
+  }
+
+  inline T fetch_div(T add) const {
+    T prev;
+    while (prev = get(), !cas(prev, prev / add))
+      ;
+    return prev;
+  }
+
+  inline T get() const { return value; }
+
+ private:
+  volatile T mutable value;
   char _padding[16 - TYPE_SIZE];
 };
 
@@ -158,6 +243,7 @@ class GuardLock {
   ~GuardLock() { mutex.unlock(); }
   operator typename Mut::Type &() { return mutex.deref_unchecked(); }
   typename Mut::Type& operator*() { return mutex.deref_unchecked(); }
+  typename Mut::Type* operator->() { return &mutex.deref_unchecked(); }
 
  private:
   Mut& mutex;
@@ -168,8 +254,9 @@ class SpinLock {
   using Type = Guardant;
 
  public:
-  SpinLock(Guardant&& value = {}, bool is_locked = false)
-      : control{std::make_shared<Control>(value, is_locked)} {}
+  SpinLock(Type&& value = {}, bool is_locked = false)
+      : control{
+            std::make_shared<Control>(std::forward<Type>(value), is_locked)} {}
 
   GuardLock<SpinLock> lock() {
     while (control->locked.swap(true) != false) {
@@ -181,7 +268,7 @@ class SpinLock {
     if (control->locked.swap(true) == false) return {*this};
     return {};
   }
-  Guardant& deref_unchecked() { return control->guardant; }
+  Type& deref_unchecked() { return control->guardant; }
   SpinLock& operator=(SpinLock&& move) {
     control = std::move(move.control);
     return *this;
@@ -200,13 +287,14 @@ class SpinLock {
       panic("Trying to unlock already unlocked spinlock.");
   }
   struct Control {
-    Control(Guardant g, bool l) : guardant{g}, locked{l} {}
-    Guardant guardant;
-    Atomic<bool> locked;
+    Control(Type&& g, bool l) : guardant{std::forward<Type>(g)}, locked{l} {}
+    Type guardant;
+    Atomic2<bool> locked;
   };
   std::shared_ptr<Control> control;
 };
 
+#if 0
 template <typename T>
 class CLIFO {
  public:
@@ -285,7 +373,7 @@ class CPEPQ {
       goto begin_loop;
     }
   }
-    if (node->next.get()==nullptr) {
+    if (node->next.get() == nullptr) {
       tail.swap(nullptr);
     }
     if (!head.cas(node_prot, node->next.get())) {
@@ -357,4 +445,180 @@ class Mutex {
   };
   std::shared_ptr<Control> control;
 };
+#endif
+
+#include <queue>
+
+#include "type.hpp"
+
+#define todo(msg) panic("TODO: " msg)
+
+#define dbg(code)
+
+template <typename Guardant>
+class Mutex {
+  using Type = Guardant;
+
+ public:
+  explicit Mutex(Type&& value = Type{}, bool is_locked = false)
+      : control{
+            std::make_shared<Control>(std::forward<Type>(value), is_locked)} {}
+
+  GuardLock<Mutex> lock() {
+    while (control->locked.swap(true) == true) {
+      { control->wait_list.lock()->push(pthread_self()); }
+      pthread_cancel(pthread_self());
+    }
+    return GuardLock{*this};
+  }
+  std::optional<GuardLock<Mutex>> try_lock() {
+    if (control->locked.swap(true) == false) return {*this};
+    return {};
+  }
+  Type& deref_unchecked() { return control->guardant; }
+  Mutex& operator=(Mutex&& move) { control = std::move(move.control); }
+  Mutex& operator=(Mutex const& copy) { control = copy.control; }
+  Mutex(Mutex&& move) { control = std::move(move.control); }
+  Mutex(Mutex const& copy) { control = copy.control; }
+  ~Mutex() {
+    // auto queue = control->wait_list.lock();
+    // if (!queue->empty()) {
+    //   auto waited = queue->front();
+    //   queue->pop();
+    //   if (waited != pthread_self()) pthread_kill(waited, SIGCONT);
+    // }
+  }
+  friend class GuardLock<Mutex>;
+
+ private:
+  void unlock() {
+    if (control->locked.swap(false) == false)
+      panic("Unlocked not locked mutex");
+    auto queue = control->wait_list.lock();
+    if (!queue->empty()) {
+      auto waited = queue->front();
+      queue->pop();
+      pthread_kill(waited, SIGCONT);
+    }
+  }
+  struct Control {
+   public:
+    Control(Type&& g, bool l)
+        : guardant{std::forward<Type>(g)}, locked{l}, wait_list{} {}
+    Type guardant;
+    Atomic2<bool> locked;
+    SpinLock<std::queue<pthread_t>> wait_list;
+  };
+  std::shared_ptr<Control> control;
+};
+
+// template <typename Guardant>
+// class Mutex2 {
+//   using Type = Guardant;
+
+//  public:
+//   explicit Mutex2(Guardant&& value = Guardant{}, bool is_locked = false)
+//       : control{std::make_shared<Control>(std::forward<Guardant>(value),
+//                                           is_locked ? this : nullptr)},
+//         thread(pthread_self()) {
+//     id = control->count.fetch_add(1);
+//   }
+
+//   GuardLock<Mutex2> lock() {
+//     Mutex2<Type>* prev = nullptr;
+//     dbg({
+//       std::stringstream ss;
+//       ss << "trying to lock " << id << "\n";
+//       std::cout << ss.str();
+//     });
+//     while ((prev = control->locked.swap((Mutex2<Type>*)-1)) != nullptr) {
+//       if (prev == (Mutex2<Type>*)-1) {
+//         sched_yield();
+//         continue;
+//       }
+//       thread = pthread_self();
+//       auto prev_pend = prev;
+//       while (!prev_pend->pending.cas(nullptr, this) &&
+//              prev_pend->pending.get() != (void*)this) {
+//         prev_pend = prev_pend->pending.get();
+//       }
+//       if (control->locked.swap(prev) != (Mutex2<Type>*)-1)
+//         panic("Changed locked value");
+//       pause();
+//     }
+//     dbg({
+//       std::stringstream ss;
+//       ss << "locked   " << id << "\n";
+//       std::cout << ss.str();
+//     });
+//     GuardLock lock{*this};
+//     if (control->locked.swap(this) != (Mutex2<Type>*)-1)
+//       panic("Changed locked value");
+//     return lock;
+//   }
+//   std::optional<GuardLock<Mutex2>> try_lock() {
+//     todo("change implementation");
+//     if (control->locked.swap(true) == false) return {*this};
+//     return {};
+//   }
+//   Guardant& deref_unchecked() { return control->guardant; }
+//   Mutex2& operator=(Mutex2&& move) {
+//     control = std::move(move.control);
+//     id = move.id;
+//   }
+//   Mutex2& operator=(Mutex2 const& copy) {
+//     dbg(std::cout << "Mutex copy assign\n";);
+//     control = copy.control;
+//     id = control->count.fetch_add(1);
+//   }
+//   Mutex2(Mutex2&& move) : control{std::move(move.control)} { id = move.id; }
+//   Mutex2(Mutex2 const& copy) : control{copy.control} {
+//     id = control->count.fetch_add(1);
+//     std::stringstream ss;
+//     // ss << "Mutex copy " << type<decltype(this)>() << "@" << id << "\n";
+//     std::cout << ss.str();
+//   }
+//   size_t getid() const { return id; }
+//   friend class GuardLock<Mutex2>;
+
+//  private:
+//   void unlock() {
+//     void* prev = nullptr;
+//     while ((prev = control->locked.swap((Mutex2<Type>*)-1)) != this) {
+//       if (prev == (void*)-1) {
+//         continue;
+//       }
+//       panic("Somebody has taken my lock");
+//     }
+//     auto pend = pending.swap(nullptr);
+//     dbg({
+//       std::stringstream ss;
+//       ss << "unlocked " << id << "\n";
+//       std::cout << ss.str();
+//     });
+//     if (control->locked.swap(nullptr) != (void*)-1)
+//       panic("Changed locked value");
+//     if (pend != nullptr) {
+//       auto next_pend = (Mutex2<Type>*)pend;
+//       dbg({
+//         std::stringstream ss;
+//         ss << "Woken up " << next_pend->id << "\n";
+//         std::cout << ss.str();
+//       });
+//       pthread_kill(next_pend->thread, SIGCONT);
+//     }
+//   }
+//   struct Control {
+//    public:
+//     Control(Guardant&& g, Mutex2<Type>* l)
+//         : guardant{std::forward<Guardant>(g)}, locked{l} {}
+//     Guardant guardant;
+//     Atomic2<Mutex2<Type>*> locked;
+//     Atomic2<size_t> count{0};
+//   };
+//   std::shared_ptr<Control> control;
+//   Atomic2<Mutex2<Type>*> pending{nullptr};
+//   pthread_t thread;
+//   size_t id;
+// };
 #endif  // THREADS_HPP

@@ -17,33 +17,43 @@
 
 #define ifnot(cond) if (!(cond))
 
-size_t constexpr SIZE = 2000;
+template<typename T>
+T copy(T const& val) {
+  return val;
+}
+
+size_t constexpr SIZE = 20;
 
 int main() {
-  SpinLock<std::string> mut{"*"};
-  std::stringstream ss;
+  Mutex<std::stringstream> ssmut{};
 
-  auto worka = [mut, &ss]() mutable {
+  auto worka = [ssmut]() mutable {
     for (size_t i = 0; i < SIZE; ++i) {
       {
-        auto lock = mut.lock();
+        dbg(std::cout << "entered " << ssmut.getid() << "\n";);
+        auto ss = ssmut.lock();
         {
-          ss << "abc" << *lock;
+          dbg(std::cout << "working " << ssmut.getid() << "\n";);
+          *ss << "abc";
           race;
-          ss << "def\n";
+          *ss << "def\n";
+          ss->flush();
         }
       }
       race;
     }
   };
-  auto workb = [mut, &ss]() mutable {
+  auto workb = [ssmut]() mutable {
     for (size_t i = 0; i < SIZE; ++i) {
       {
-        auto lock = mut.lock();
+        dbg(std::cout << "entered " << ssmut.getid() << "\n";);
+        auto ss = ssmut.lock();
         {
-          ss << "123" << *lock;
+          dbg(std::cout << "working " << ssmut.getid() << "\n";);
+          *ss << "123";
           race;
-          ss << "456\n";
+          *ss << "456\n";
+          ss->flush();
         }
       }
       race;
@@ -54,11 +64,11 @@ int main() {
   std::bernoulli_distribution bd;
 
   std::vector<Thread> threads;
-  for (auto i = 0ul; i < 100; ++i)
+  for (auto i = 0ul; i < 4; ++i)
     if (bd(rd))
-      threads.emplace_back(worka);
+      threads.emplace_back(copy(worka));
     else
-      threads.emplace_back(workb);
+      threads.emplace_back(copy(workb));
 
   for (auto& th : threads) {
     th.join();
@@ -66,9 +76,10 @@ int main() {
 
   std::string str;
   size_t first = 0, second = 0;
-  while (std::getline(ss, str, '\n')) {
-    ifnot(str == "abc*def" || str == "123*456") panic("Got invalid line");
-    if (str == "abc*def")
+  std::cout << ssmut.deref_unchecked().str();
+  while (std::getline(ssmut.deref_unchecked(), str, '\n')) {
+    ifnot(str == "abcdef" || str == "123456") panic("Got invalid line");
+    if (str == "abcdef")
       ++first;
     else
       ++second;

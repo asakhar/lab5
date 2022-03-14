@@ -11,8 +11,8 @@ else()
 endif()
 target_compile_features(default INTERFACE cxx_std_20)
 
-add_executable(lab lab5.cpp errors.cpp threads.hpp)
+add_executable(lab lab5.cpp errors.cpp threads.hpp type.cpp)
 target_link_libraries(lab PUBLIC default)
 
-add_executable(test test.cpp errors.cpp threads.hpp)
+add_executable(test test.cpp errors.cpp threads.hpp type.cpp)
 target_link_libraries(test PUBLIC default)
