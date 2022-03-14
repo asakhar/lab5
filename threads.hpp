@@ -1,7 +1,8 @@
 #ifndef THREADS_HPP
 #define THREADS_HPP
-#include <tuple>
+#include <iostream>
 #include <sstream>
+#include <tuple>
 
 #ifdef __linux__
 #include <optional>
@@ -18,33 +19,31 @@ public:
   T &operator*() { return value; }
   optional() : contains_value(false) {}
   optional(T val) : value{val}, contains_value{true} {}
-  bool operator==(nullopt_t) {
-      return !contains_value;
-  }
-  bool operator!=(nullopt_t) {
-      return contains_value;
-  }
+  bool operator==(nullopt_t) { return !contains_value; }
+  bool operator!=(nullopt_t) { return contains_value; }
+
 private:
   T value;
   bool contains_value;
 };
-//namespace detail {
-//template <class F, class Tuple, std::size_t... I>
-//constexpr decltype(auto) apply_impl(F&& f, Tuple&& t, std::index_sequence<I...>)
-//{
-//    // This implementation is valid since C++20 (via P1065R2)
-//    // In C++17, a constexpr counterpart of std::invoke is actually needed here
-//    return std::invoke(std::forward<F>(f), std::get<I>(std::forward<Tuple>(t))...);
-//}
-//}  // namespace detail
-// 
-//template <class F, class Tuple>
-//constexpr decltype(auto) apply(F&& f, Tuple&& t)
-//{
-//    return detail::apply_impl(
-//        std::forward<F>(f), std::forward<Tuple>(t),
-//        std::make_index_sequence<std::tuple_size_v<std::remove_reference_t<Tuple>>>{});
-//}
+namespace detail {
+template <class F, class Tuple, std::size_t... I>
+constexpr decltype(auto) apply_impl(F &&f, Tuple &&t,
+                                    std::index_sequence<I...>) {
+  // This implementation is valid since C++20 (via P1065R2)
+  // In C++17, a constexpr counterpart of std::invoke is actually needed here
+  return std::invoke(std::forward<F>(f),
+                     std::get<I>(std::forward<Tuple>(t))...);
+}
+} // namespace detail
+
+template <class F, class Tuple>
+constexpr decltype(auto) apply(F &&f, Tuple &&t) {
+  return detail::apply_impl(
+      std::forward<F>(f), std::forward<Tuple>(t),
+      std::make_index_sequence<
+          std::tuple_size_v<std::remove_reference_t<Tuple>>>{});
+}
 }; // namespace std
 #endif
 
@@ -191,8 +190,9 @@ template <typename Mut> class GuardLock {
 public:
   GuardLock(Mut &mut) : mutex{mut} {}
   ~GuardLock() {
-      //std::cout << "~GuardLock()" << std::endl;
-      mutex.unlock(); }
+    // std::cout << "~GuardLock()" << std::endl;
+    mutex.unlock();
+  }
   operator typename Mut::Type &() { return mutex.deref_unchecked(); }
   typename Mut::Type &operator*() { return mutex.deref_unchecked(); }
 
@@ -204,8 +204,9 @@ template <typename Guardant> class SpinLock {
   using Type = Guardant;
 
 public:
-  SpinLock(Guardant &&value = {}, bool is_locked = false)
-      : control{std::make_shared<Control>(value, is_locked)} {}
+  SpinLock(Type &&value = Type{}, bool is_locked = false)
+      : control{
+            std::make_shared<Control>(std::forward<Type>(value), is_locked)} {}
 
   GuardLock<SpinLock> lock() {
     while (control->locked.swap(true) != false) {
@@ -237,9 +238,48 @@ private:
       panic("Trying to unlock already unlocked spinlock.");
   }
   struct Control {
-    Control(Guardant g, bool l) : guardant{g}, locked{l} {}
+    Control(Type &&g, bool l) : guardant{std::forward<Type>(g)}, locked{l} {}
     Guardant guardant;
     Atomic<bool> locked;
+  };
+  std::shared_ptr<Control> control;
+};
+
+template <typename Guardant> class CritSec {
+  using Type = Guardant;
+
+public:
+  CritSec(Type &&value = Type{}, bool is_locked = false)
+      : control{std::make_shared<Control>(std::forward<Type>(value))} {
+    lock();
+  }
+
+  GuardLock<CritSec> lock() {
+    EnterCriticalSection(&control->locked);
+    return GuardLock{*this};
+  }
+  Guardant &deref_unchecked() { return control->guardant; }
+  CritSec &operator=(CritSec &&move) {
+    control = std::move(move.control);
+    return *this;
+  }
+  CritSec &operator=(CritSec const &copy) {
+    control = copy.control;
+    return *this;
+  }
+  CritSec(CritSec &&move) { control = std::move(move.control); }
+  CritSec(CritSec const &copy) { control = copy.control; }
+  friend class GuardLock<CritSec>;
+
+private:
+  void unlock() { LeaveCriticalSection(&control->locked); }
+  struct Control {
+    Control(Guardant &&g) : guardant{std::forward<Type>(g)} {
+      InitializeCriticalSection(&locked);
+    }
+    ~Control() { DeleteCriticalSection(&locked); }
+    Guardant guardant;
+    CRITICAL_SECTION locked{};
   };
   std::shared_ptr<Control> control;
 };
@@ -377,8 +417,8 @@ public:
   Mutex(Mutex &&move) { control = std::move(move.control); }
   Mutex(Mutex const &copy) { control = copy.control; }
   ~Mutex() {
-      std::cout << "~Mutex()" << std::endl;
-      unlock();
+    std::cout << "~Mutex()" << std::endl;
+    unlock();
   }
   friend class GuardLock<Mutex>;
 
@@ -387,16 +427,16 @@ private:
     control->locked.swap(false);
     std::optional<HANDLE> waited;
     do {
-        waited = control->wait_list.pop();
-        if (waited == std::nullopt) {
-            break;
-        }
-        std::stringstream ss;
-        ss << "resumed " << *waited << std::endl;
-        std::cout << ss.str();
-        ResumeThread(*waited);
-        /*if (control.use_count() != 1)
-            break;*/
+      waited = control->wait_list.pop();
+      if (waited == std::nullopt) {
+        break;
+      }
+      std::stringstream ss;
+      ss << "resumed " << *waited << std::endl;
+      std::cout << ss.str();
+      ResumeThread(*waited);
+      /*if (control.use_count() != 1)
+          break;*/
     } while (waited != std::nullopt);
   }
   struct Control {

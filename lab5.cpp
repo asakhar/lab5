@@ -56,7 +56,7 @@ int main(int argc, char const* argv[]) {
   size_t lastBlockSize = fileSize - blockSize * (processorsQuantity - 1);
   char character_to_count = argv[3][0];
   std::ifstream file{argv[1]};
-  My::Mutex<size_t> result{0};
+  My::CritSec<size_t> result{0};
 
   auto p = [result](std::vector<char> data, char to_find) mutable {
     size_t res = 0;
